@@ -12,8 +12,8 @@ import threading
 import time
 import traceback
 
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "0")
 
 import requests
 import runpod
