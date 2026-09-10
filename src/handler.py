@@ -12,8 +12,8 @@ import threading
 import time
 import traceback
 
-os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-os.environ.setdefault("HF_HUB_DISABLE_XET", "0")
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import requests
 import runpod
@@ -49,18 +49,60 @@ def _find_llama_server():
 
 
 def _download_model():
+    """Descarga directa por HTTP con reanudación (Xet falla en network volumes)."""
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = os.path.join(MODEL_DIR, MODEL_FILE)
     if os.path.isfile(path) and os.path.getsize(path) > 10 * 1024**3:
         STATE["detail"] = f"cacheado {os.path.getsize(path)/1024**3:.1f} GB"
         return path
-    from huggingface_hub import hf_hub_download
+
+    # limpiar restos de intentos previos (xet .incomplete)
+    for root, _d, files in os.walk(MODEL_DIR):
+        for f in files:
+            if f.endswith(".incomplete"):
+                try:
+                    os.remove(os.path.join(root, f))
+                except OSError:
+                    pass
+
+    url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
+    tmp = path + ".part"
     STATE["phase"] = "downloading"
-    STATE["detail"] = f"{MODEL_REPO}/{MODEL_FILE}"
-    _log(f"descargando {MODEL_REPO}/{MODEL_FILE}")
-    p = hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE, local_dir=MODEL_DIR)
-    _log(f"descarga lista: {os.path.getsize(p)/1024**3:.1f} GB")
-    return p
+    total = 0
+    for attempt in range(6):
+        have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
+        headers = {"User-Agent": "Mozilla/5.0"}
+        if have:
+            headers["Range"] = f"bytes={have}-"
+        try:
+            with requests.get(url, headers=headers, stream=True, timeout=(30, 120)) as r:
+                if r.status_code not in (200, 206):
+                    raise RuntimeError(f"HTTP {r.status_code} en descarga")
+                total = have + int(r.headers.get("Content-Length", 0))
+                STATE["detail"] = f"{have/1024**3:.1f}/{total/1024**3:.1f} GB (intento {attempt+1})"
+                mode = "ab" if have and r.status_code == 206 else "wb"
+                if mode == "wb":
+                    have = 0
+                last = time.time()
+                with open(tmp, mode) as f:
+                    for chunk in r.iter_content(8 * 1024 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        have += len(chunk)
+                        if time.time() - last > 15:
+                            STATE["detail"] = f"{have/1024**3:.2f}/{total/1024**3:.2f} GB"
+                            last = time.time()
+            if os.path.getsize(tmp) > 10 * 1024**3:
+                os.replace(tmp, path)
+                _log(f"descarga OK: {os.path.getsize(path)/1024**3:.2f} GB")
+                return path
+            raise RuntimeError(f"descarga corta: {os.path.getsize(tmp)} bytes")
+        except Exception as e:
+            _log(f"reintento {attempt+1} tras error: {e}")
+            STATE["detail"] = f"reintento {attempt+1}: {e}"
+            time.sleep(5)
+    raise RuntimeError(f"no se pudo descargar tras 6 intentos: {STATE['detail']}")
 
 
 def _start_server(model_path):
