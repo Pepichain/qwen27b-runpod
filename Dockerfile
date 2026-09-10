@@ -4,7 +4,7 @@ USER root
 ENTRYPOINT []
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip \
+        python3 python3-pip curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv
@@ -22,6 +22,6 @@ ENV HF_HUB_ENABLE_HF_TRANSFER=0 \
 RUN pip3 install --no-cache-dir --break-system-packages \
         runpod==1.12.0 requests huggingface_hub
 
-COPY src/handler.py /srv/handler.py
+COPY src/handler.py /srv/handler_pepi.py
 
-CMD ["python3", "-u", "/srv/handler.py"]
+CMD ["python3", "-u", "/srv/handler_pepi.py"]
