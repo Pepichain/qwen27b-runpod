@@ -136,6 +136,18 @@ def _diag():
     try:
         mp = os.path.join(MODEL_DIR, MODEL_FILE)
         info["model_size_gb"] = round(os.path.getsize(mp) / 1024**3, 2) if os.path.isfile(mp) else 0
+        # progreso real: archivos .incomplete de huggingface_hub
+        partials = []
+        for root, _dirs, files in os.walk(MODEL_DIR):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    continue
+                if sz > 50 * 1024**2:
+                    partials.append({"f": f[-45:], "gb": round(sz / 1024**3, 2)})
+        info["partials"] = sorted(partials, key=lambda x: -x["gb"])[:5]
         st = os.statvfs(VOL) if os.path.isdir(VOL) else os.statvfs("/")
         info["free_gb"] = round(st.f_bavail * st.f_frsize / 1024**3, 1)
     except Exception as e:
