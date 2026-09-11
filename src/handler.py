@@ -185,7 +185,7 @@ def _start_server(model_path):
            "--jinja", "--no-webui"]
     tpl = _fetch_tool_template()
     if tpl and os.environ.get("USE_HERMES_TEMPLATE", "1") == "1":
-        cmd += ["--chat-template-file", tpl, "--parser", "hermes"]
+        cmd += ["--chat-template-file", tpl]
     STATE["phase"] = "loading"
     STATE["detail"] = " ".join(cmd)
     _log("arrancando: " + " ".join(cmd))
