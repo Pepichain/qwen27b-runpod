@@ -53,7 +53,7 @@ def _find_llama_server():
 
 
 def _download_model():
-    """Descarga directa por HTTP con reanudación, a disco LOCAL (rápido).
+    """Descarga paralela por rangos HTTP a disco LOCAL (rápido y resistente a cortes).
     Si el volume ya tiene el modelo cacheado, lo usa desde ahí sin descargar."""
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = os.path.join(MODEL_DIR, MODEL_FILE)
@@ -61,64 +61,94 @@ def _download_model():
         STATE["detail"] = f"local {os.path.getsize(path)/1024**3:.1f} GB"
         return path
 
-    # ¿está cacheado en el network volume de corridas anteriores?
     cached = os.path.join(CACHE_DIR, MODEL_FILE)
     if os.path.isfile(cached) and os.path.getsize(cached) > 10 * 1024**3:
         STATE["phase"] = "cache-hit"
-        STATE["detail"] = f"usando caché del volume: {os.path.getsize(cached)/1024**3:.1f} GB"
+        STATE["detail"] = f"cache del volume: {os.path.getsize(cached)/1024**3:.1f} GB"
         _log("modelo encontrado en el network volume")
         return cached
 
     url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
     tmp = path + ".part"
     STATE["phase"] = "downloading"
-    total = 0
-    for attempt in range(60):
-        have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
-        headers = {"User-Agent": "Mozilla/5.0"}
-        if have:
-            headers["Range"] = f"bytes={have}-"
+
+    head = requests.head(url, allow_redirects=True, timeout=60)
+    total = int(head.headers.get("Content-Length", 0))
+    if total < 1024**3:
+        raise RuntimeError(f"Content-Length inesperado: {total}")
+    _log(f"tamaño total: {total/1024**3:.2f} GB")
+
+    NPARTS = int(os.environ.get("DL_PARTS", "16"))
+    part_size = total // NPARTS
+    ranges = []
+    for i in range(NPARTS):
+        start = i * part_size
+        end = (total - 1) if i == NPARTS - 1 else (start + part_size - 1)
+        ranges.append((i, start, end))
+
+    # preasignar archivo
+    with open(tmp, "wb") as f:
+        f.truncate(total)
+
+    done_bytes = [0] * NPARTS
+    errors = []
+
+    def fetch(idx, start, end):
+        pos = start
+        for attempt in range(20):
+            try:
+                hdr = {"Range": f"bytes={pos}-{end}", "User-Agent": "Mozilla/5.0"}
+                with requests.get(url, headers=hdr, stream=True, timeout=(30, 120)) as r:
+                    if r.status_code != 206:
+                        raise RuntimeError(f"HTTP {r.status_code}")
+                    with open(tmp, "r+b") as f:
+                        f.seek(pos)
+                        for chunk in r.iter_content(4 * 1024 * 1024):
+                            if not chunk:
+                                continue
+                            f.write(chunk)
+                            pos += len(chunk)
+                            done_bytes[idx] = pos - start
+                if pos > end:
+                    return
+            except Exception as e:
+                time.sleep(3)
+                if attempt == 19:
+                    errors.append(f"parte {idx}: {e}")
+        if pos <= end:
+            errors.append(f"parte {idx} incompleta ({pos}/{end})")
+
+    threads = [threading.Thread(target=fetch, args=r, daemon=True) for r in ranges]
+    for t in threads:
+        t.start()
+
+    while any(t.is_alive() for t in threads):
+        got = sum(done_bytes)
+        STATE["detail"] = f"{got/1024**3:.2f}/{total/1024**3:.2f} GB ({NPARTS} hilos)"
+        time.sleep(10)
+    for t in threads:
+        t.join()
+
+    if errors:
+        raise RuntimeError("descarga con errores: " + "; ".join(errors[:3]))
+    size = os.path.getsize(tmp)
+    if size < 10 * 1024**3:
+        raise RuntimeError(f"archivo corto: {size}")
+    os.replace(tmp, path)
+    _log(f"descarga OK: {size/1024**3:.2f} GB")
+
+    def _cache():
         try:
-            with requests.get(url, headers=headers, stream=True, timeout=(30, 120)) as r:
-                if r.status_code not in (200, 206):
-                    raise RuntimeError(f"HTTP {r.status_code} en descarga")
-                total = have + int(r.headers.get("Content-Length", 0))
-                STATE["detail"] = f"{have/1024**3:.1f}/{total/1024**3:.1f} GB (intento {attempt+1})"
-                mode = "ab" if have and r.status_code == 206 else "wb"
-                if mode == "wb":
-                    have = 0
-                last = time.time()
-                with open(tmp, mode) as f:
-                    for chunk in r.iter_content(8 * 1024 * 1024):
-                        if not chunk:
-                            continue
-                        f.write(chunk)
-                        have += len(chunk)
-                        if time.time() - last > 15:
-                            STATE["detail"] = f"{have/1024**3:.2f}/{total/1024**3:.2f} GB"
-                            last = time.time()
-            if os.path.getsize(tmp) > 10 * 1024**3:
-                os.replace(tmp, path)
-                _log(f"descarga OK: {os.path.getsize(path)/1024**3:.2f} GB")
-                # copiar al volume en background para futuros cold starts
-                def _cache():
-                    try:
-                        os.makedirs(CACHE_DIR, exist_ok=True)
-                        dst = os.path.join(CACHE_DIR, MODEL_FILE)
-                        if not (os.path.isfile(dst) and os.path.getsize(dst) > 10 * 1024**3):
-                            shutil.copyfile(path, dst + ".part")
-                            os.replace(dst + ".part", dst)
-                            _log("modelo cacheado en el volume")
-                    except Exception as ce:
-                        _log(f"cache al volume fallo (no critico): {ce}")
-                threading.Thread(target=_cache, daemon=True).start()
-                return path
-            raise RuntimeError(f"descarga corta: {os.path.getsize(tmp)} bytes")
-        except Exception as e:
-            _log(f"reintento {attempt+1} tras error: {e}")
-            STATE["detail"] = f"reintento {attempt+1}: {e}"
-            time.sleep(5)
-    raise RuntimeError(f"no se pudo descargar tras 60 intentos: {STATE['detail']}")
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            dst = os.path.join(CACHE_DIR, MODEL_FILE)
+            if not (os.path.isfile(dst) and os.path.getsize(dst) > 10 * 1024**3):
+                shutil.copyfile(path, dst + ".part")
+                os.replace(dst + ".part", dst)
+                _log("modelo cacheado en el volume")
+        except Exception as ce:
+            _log(f"cache al volume fallo (no critico): {ce}")
+    threading.Thread(target=_cache, daemon=True).start()
+    return path
 
 
 def _start_server(model_path):
