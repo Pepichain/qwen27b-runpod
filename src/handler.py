@@ -190,6 +190,12 @@ def _start_server(model_path):
     cmd = [binp, "-m", model_path, "--port", str(LLAMA_PORT), "-ngl", str(N_GPU_LAYERS),
            "-c", str(CTX_SIZE), "--parallel", str(PARALLEL), "--host", "127.0.0.1",
            "--jinja", "--no-webui"]
+    # Cuantizar la cache KV (q8_0) permite contextos grandes (64K+) en 24 GB:
+    # a 64K la KV en f16 de un 27B no cabe junto al modelo. Configurable por si
+    # se quiere f16 en GPUs con mas VRAM.
+    kv = os.environ.get("KV_CACHE_TYPE", "q8_0")
+    if kv and kv != "f16":
+        cmd += ["--cache-type-k", kv, "--cache-type-v", kv, "--flash-attn", "on"]
     tpl = _fetch_tool_template()
     if tpl and os.environ.get("USE_HERMES_TEMPLATE", "1") == "1":
         cmd += ["--chat-template-file", tpl]
