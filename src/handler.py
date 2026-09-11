@@ -195,6 +195,8 @@ def _start_server(model_path):
         cmd += ["--chat-template-file", tpl]
     STATE["phase"] = "loading"
     STATE["detail"] = " ".join(cmd)
+    STATE["cmd"] = " ".join(cmd)
+    STATE["tool_template"] = bool(tpl) and os.environ.get("USE_HERMES_TEMPLATE", "1") == "1"
     _log("arrancando: " + " ".join(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     tail = []
@@ -246,7 +248,15 @@ def _ensure_boot():
 
 
 def _diag():
-    info = {"phase": STATE["phase"], "detail": STATE["detail"][-800:], "error": STATE["error"]}
+    info = {"phase": STATE["phase"], "detail": STATE["detail"][-800:], "error": STATE["error"],
+            "cmd": STATE.get("cmd"), "tool_template": STATE.get("tool_template")}
+    try:
+        props = requests.get(f"{BASE_URL}/props", timeout=10).json()
+        tpl = props.get("chat_template") or ""
+        info["server_template_head"] = tpl[:200]
+        info["server_template_has_tool_call"] = "tool_call" in tpl
+    except Exception as e:
+        info["server_template_head"] = f"err {e}"
     try:
         info["gpu"] = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
                                       "--format=csv,noheader"], capture_output=True,
