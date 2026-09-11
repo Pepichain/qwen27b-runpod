@@ -69,7 +69,7 @@ def _download_model():
     tmp = path + ".part"
     STATE["phase"] = "downloading"
     total = 0
-    for attempt in range(6):
+    for attempt in range(60):
         have = os.path.getsize(tmp) if os.path.isfile(tmp) else 0
         headers = {"User-Agent": "Mozilla/5.0"}
         if have:
@@ -102,7 +102,7 @@ def _download_model():
             _log(f"reintento {attempt+1} tras error: {e}")
             STATE["detail"] = f"reintento {attempt+1}: {e}"
             time.sleep(5)
-    raise RuntimeError(f"no se pudo descargar tras 6 intentos: {STATE['detail']}")
+    raise RuntimeError(f"no se pudo descargar tras 60 intentos: {STATE['detail']}")
 
 
 def _start_server(model_path):
