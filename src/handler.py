@@ -151,6 +151,31 @@ def _download_model():
     return path
 
 
+TOOL_TEMPLATE_URL = ("https://raw.githubusercontent.com/Pepichain/qwen27b-runpod/"
+                     "main/src/hermes-tool-use.jinja")
+TOOL_TEMPLATE_PATH = "/srv/hermes-tool-use.jinja"
+
+
+def _fetch_tool_template():
+    """Baja la plantilla Hermes tool_use (renderiza tools + formato <tool_call>).
+    El template incrustado en los GGUF de Hermes-3 es el 'default' sin tools;
+    este es el variant 'tool_use' oficial de NousResearch."""
+    try:
+        r = requests.get(TOOL_TEMPLATE_URL, timeout=30)
+        r.raise_for_status()
+        txt = r.text
+        if "<tool_call>" not in txt or len(txt) < 1000:
+            _log("template tool_use inesperado, ignoro")
+            return None
+        with open(TOOL_TEMPLATE_PATH, "w") as f:
+            f.write(txt)
+        _log("template tool_use descargado OK")
+        return TOOL_TEMPLATE_PATH
+    except Exception as e:
+        _log(f"no pude bajar template tool_use: {e}")
+        return None
+
+
 def _start_server(model_path):
     binp = _find_llama_server()
     env = dict(os.environ)
@@ -158,6 +183,9 @@ def _start_server(model_path):
     cmd = [binp, "-m", model_path, "--port", str(LLAMA_PORT), "-ngl", str(N_GPU_LAYERS),
            "-c", str(CTX_SIZE), "--parallel", str(PARALLEL), "--host", "127.0.0.1",
            "--jinja", "--no-webui"]
+    tpl = _fetch_tool_template()
+    if tpl and os.environ.get("USE_HERMES_TEMPLATE", "1") == "1":
+        cmd += ["--chat-template-file", tpl, "--parser", "hermes"]
     STATE["phase"] = "loading"
     STATE["detail"] = " ".join(cmd)
     _log("arrancando: " + " ".join(cmd))
