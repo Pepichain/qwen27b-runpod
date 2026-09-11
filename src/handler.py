@@ -19,7 +19,11 @@ import requests
 import runpod
 
 VOL = os.environ.get("RPVOL", "/runpod-volume/qwen27b")
-MODEL_DIR = os.path.join(VOL, "models")
+# Escribir en disco local del contenedor es MUCHO más rápido que el network volume.
+# Si hay volume, se usa como caché persistente: se copia ahí al terminar.
+LOCAL_DIR = os.environ.get("LOCAL_MODEL_DIR", "/models")
+MODEL_DIR = LOCAL_DIR
+CACHE_DIR = os.path.join(VOL, "models")
 MODEL_REPO = os.environ.get("MODEL_REPO", "OBLITERATUS/Qwen3.8-27B-OBLITERATED")
 MODEL_FILE = os.environ.get("MODEL_FILE", "Qwen3.8-27B-OBLITERATED-IQ4_XS.gguf")
 LLAMA_PORT = int(os.environ.get("LLAMA_PORT", "8080"))
@@ -49,21 +53,21 @@ def _find_llama_server():
 
 
 def _download_model():
-    """Descarga directa por HTTP con reanudación (Xet falla en network volumes)."""
+    """Descarga directa por HTTP con reanudación, a disco LOCAL (rápido).
+    Si el volume ya tiene el modelo cacheado, lo usa desde ahí sin descargar."""
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = os.path.join(MODEL_DIR, MODEL_FILE)
     if os.path.isfile(path) and os.path.getsize(path) > 10 * 1024**3:
-        STATE["detail"] = f"cacheado {os.path.getsize(path)/1024**3:.1f} GB"
+        STATE["detail"] = f"local {os.path.getsize(path)/1024**3:.1f} GB"
         return path
 
-    # limpiar restos de intentos previos (xet .incomplete)
-    for root, _d, files in os.walk(MODEL_DIR):
-        for f in files:
-            if f.endswith(".incomplete"):
-                try:
-                    os.remove(os.path.join(root, f))
-                except OSError:
-                    pass
+    # ¿está cacheado en el network volume de corridas anteriores?
+    cached = os.path.join(CACHE_DIR, MODEL_FILE)
+    if os.path.isfile(cached) and os.path.getsize(cached) > 10 * 1024**3:
+        STATE["phase"] = "cache-hit"
+        STATE["detail"] = f"usando caché del volume: {os.path.getsize(cached)/1024**3:.1f} GB"
+        _log("modelo encontrado en el network volume")
+        return cached
 
     url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
     tmp = path + ".part"
@@ -96,6 +100,18 @@ def _download_model():
             if os.path.getsize(tmp) > 10 * 1024**3:
                 os.replace(tmp, path)
                 _log(f"descarga OK: {os.path.getsize(path)/1024**3:.2f} GB")
+                # copiar al volume en background para futuros cold starts
+                def _cache():
+                    try:
+                        os.makedirs(CACHE_DIR, exist_ok=True)
+                        dst = os.path.join(CACHE_DIR, MODEL_FILE)
+                        if not (os.path.isfile(dst) and os.path.getsize(dst) > 10 * 1024**3):
+                            shutil.copyfile(path, dst + ".part")
+                            os.replace(dst + ".part", dst)
+                            _log("modelo cacheado en el volume")
+                    except Exception as ce:
+                        _log(f"cache al volume fallo (no critico): {ce}")
+                threading.Thread(target=_cache, daemon=True).start()
                 return path
             raise RuntimeError(f"descarga corta: {os.path.getsize(tmp)} bytes")
         except Exception as e:
@@ -176,7 +192,7 @@ def _diag():
                                  if os.path.isfile(c)), shutil.which("llama-server") or "NO ENCONTRADO")
     info["vol_exists"] = os.path.isdir("/runpod-volume")
     try:
-        mp = os.path.join(MODEL_DIR, MODEL_FILE)
+        mp = STATE.get("model_path") or os.path.join(MODEL_DIR, MODEL_FILE)
         info["model_size_gb"] = round(os.path.getsize(mp) / 1024**3, 2) if os.path.isfile(mp) else 0
         # progreso real: archivos .incomplete de huggingface_hub
         partials = []
