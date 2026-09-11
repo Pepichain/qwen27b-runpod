@@ -52,31 +52,38 @@ def _find_llama_server():
     raise RuntimeError("llama-server no encontrado en la imagen")
 
 
+def _remote_size(url):
+    """Tamaño exacto del GGUF en HF. Nunca validar contra un piso hardcodeado:
+    un modelo de 4.9 GB es tan valido como uno de 16 GB."""
+    head = requests.head(url, allow_redirects=True, timeout=60)
+    total = int(head.headers.get("Content-Length", 0))
+    if total < 100 * 1024**2:
+        raise RuntimeError(f"Content-Length inesperado: {total}")
+    return total
+
+
 def _download_model():
     """Descarga paralela por rangos HTTP a disco LOCAL (rápido y resistente a cortes).
     Si el volume ya tiene el modelo cacheado, lo usa desde ahí sin descargar."""
     os.makedirs(MODEL_DIR, exist_ok=True)
     path = os.path.join(MODEL_DIR, MODEL_FILE)
-    if os.path.isfile(path) and os.path.getsize(path) > 10 * 1024**3:
-        STATE["detail"] = f"local {os.path.getsize(path)/1024**3:.1f} GB"
+    url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
+    total = _remote_size(url)
+    _log(f"tamaño esperado: {total/1024**3:.2f} GB")
+
+    if os.path.isfile(path) and os.path.getsize(path) == total:
+        STATE["detail"] = f"local {total/1024**3:.1f} GB"
         return path
 
     cached = os.path.join(CACHE_DIR, MODEL_FILE)
-    if os.path.isfile(cached) and os.path.getsize(cached) > 10 * 1024**3:
+    if os.path.isfile(cached) and os.path.getsize(cached) == total:
         STATE["phase"] = "cache-hit"
-        STATE["detail"] = f"cache del volume: {os.path.getsize(cached)/1024**3:.1f} GB"
+        STATE["detail"] = f"cache del volume: {total/1024**3:.1f} GB"
         _log("modelo encontrado en el network volume")
         return cached
 
-    url = f"https://huggingface.co/{MODEL_REPO}/resolve/main/{MODEL_FILE}?download=true"
     tmp = path + ".part"
     STATE["phase"] = "downloading"
-
-    head = requests.head(url, allow_redirects=True, timeout=60)
-    total = int(head.headers.get("Content-Length", 0))
-    if total < 1024**3:
-        raise RuntimeError(f"Content-Length inesperado: {total}")
-    _log(f"tamaño total: {total/1024**3:.2f} GB")
 
     NPARTS = int(os.environ.get("DL_PARTS", "16"))
     part_size = total // NPARTS
@@ -141,7 +148,7 @@ def _download_model():
         try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             dst = os.path.join(CACHE_DIR, MODEL_FILE)
-            if not (os.path.isfile(dst) and os.path.getsize(dst) > 10 * 1024**3):
+            if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(path)):
                 shutil.copyfile(path, dst + ".part")
                 os.replace(dst + ".part", dst)
                 _log("modelo cacheado en el volume")
