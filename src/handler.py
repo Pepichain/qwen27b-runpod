@@ -132,8 +132,8 @@ def _download_model():
     if errors:
         raise RuntimeError("descarga con errores: " + "; ".join(errors[:3]))
     size = os.path.getsize(tmp)
-    if size < 10 * 1024**3:
-        raise RuntimeError(f"archivo corto: {size}")
+    if size != total:
+        raise RuntimeError(f"archivo corto: {size} != {total}")
     os.replace(tmp, path)
     _log(f"descarga OK: {size/1024**3:.2f} GB")
 
