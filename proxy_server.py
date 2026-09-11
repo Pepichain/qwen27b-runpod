@@ -22,6 +22,7 @@ Expone:
 """
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -31,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qwen_runpod as qr
 
 PORT = int(os.environ.get("PROXY_PORT", "8081"))
-MODEL_NAME = os.environ.get("MODEL_NAME", "dolphin3-8b-uncensored")
+MODEL_NAME = os.environ.get("MODEL_NAME", "qwen3.8-27b-obliterated")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -103,6 +104,15 @@ class Handler(BaseHTTPRequestHandler):
 
         msg = out["choices"][0]["message"]
         content = msg.get("content") or ""
+        # Quitar el bloque de razonamiento <think>...</think> que Qwen antepone:
+        # ensucia el texto visible y la plantilla Hermes no respeta enable_thinking.
+        # Se elimina el bloque cerrado; si quedó abierto (se cortó por longitud),
+        # se descarta todo lo previo al ultimo cierre o el rastro suelto.
+        content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
+        if "<think>" in content and "</think>" not in content:
+            content = content.split("<think>", 1)[0]
+        content = content.lstrip("\n")
+        msg["content"] = content
         tool_calls = msg.get("tool_calls")
         finish_reason = out["choices"][0].get("finish_reason", "stop")
         cid = out.get("id") or f"chatcmpl-{uuid.uuid4().hex}"
