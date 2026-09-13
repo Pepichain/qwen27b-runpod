@@ -1,0 +1,24 @@
+# Worker vLLM para Qwen3.8-27B-OBLITERATED (arquitectura Qwen3_5).
+# vLLM soporta Qwen3_5 de forma nativa, asi que conserva la plantilla original
+# del modelo (llama.cpp no podia) y con ella la planificacion multi-paso.
+FROM vllm/vllm-openai:latest
+
+USER root
+ENTRYPOINT []
+
+WORKDIR /srv
+
+ENV HF_HUB_DISABLE_XET=1 \
+    MODEL_REPO=quocbao747/Qwen3.8-27B-OBLITERATED-W4A16-24GB \
+    RPVOL=/runpod-volume/qwen27b \
+    CTX_SIZE=32768 \
+    GPU_UTIL=0.92 \
+    VLLM_PORT=8000 \
+    SERVED_NAME=qwen3.8-27b-obliterated \
+    TOOL_PARSER=hermes
+
+RUN pip install --no-cache-dir runpod==1.12.0 requests
+
+COPY src/handler_vllm.py /srv/handler_vllm.py
+
+CMD ["python3", "-u", "/srv/handler_vllm.py"]
