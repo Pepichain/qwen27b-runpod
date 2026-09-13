@@ -86,6 +86,22 @@ class Handler(BaseHTTPRequestHandler):
             ctk = {"enable_thinking": False}
         kw["chat_template_kwargs"] = ctk
 
+        # La plantilla Hermes tool_use NO respeta enable_thinking, asi que Qwen
+        # sigue gastando tokens (y segundos) razonando en <think> antes de cada
+        # respuesta. Se corta por prompt con la instruccion /no_think en el
+        # system. NO usar stop=["<think>"]: el modelo abre el bloque en el primer
+        # token, el stop lo corta ahi mismo y la respuesta llega VACIA.
+        # NO_THINK=0 desactiva esta inyeccion.
+        if os.environ.get("NO_THINK", "1") == "1":
+            messages = list(messages)
+            marker = "/no_think"
+            if messages and messages[0].get("role") == "system":
+                if marker not in (messages[0].get("content") or ""):
+                    messages[0] = {**messages[0],
+                                   "content": f"{messages[0].get('content','')}\n\n{marker}"}
+            else:
+                messages.insert(0, {"role": "system", "content": marker})
+
         t0 = time.time()
         try:
             out = qr.raw_chat(messages, max_tokens=max_tokens, temperature=temperature,
@@ -104,14 +120,21 @@ class Handler(BaseHTTPRequestHandler):
 
         msg = out["choices"][0]["message"]
         content = msg.get("content") or ""
+        raw_content = content
         # Quitar el bloque de razonamiento <think>...</think> que Qwen antepone:
         # ensucia el texto visible y la plantilla Hermes no respeta enable_thinking.
-        # Se elimina el bloque cerrado; si quedó abierto (se cortó por longitud),
-        # se descarta todo lo previo al ultimo cierre o el rastro suelto.
         content = re.sub(r"<think>.*?</think>\s*", "", content, flags=re.DOTALL)
         if "<think>" in content and "</think>" not in content:
-            content = content.split("<think>", 1)[0]
+            # Thinking sin cerrar = la generacion se corto por max_tokens dentro
+            # del razonamiento. Si se filtra queda vacio y el cliente ve "sin
+            # respuesta"; mejor devolver el razonamiento como texto que nada.
+            head, _, tail = content.partition("<think>")
+            content = head if head.strip() else tail
         content = content.lstrip("\n")
+        if not content.strip() and not msg.get("tool_calls"):
+            # Nunca devolver content vacio sin tool_calls: el cliente lo reporta
+            # como "empty content". Conservar el original aunque traiga <think>.
+            content = raw_content
         msg["content"] = content
         tool_calls = msg.get("tool_calls")
         finish_reason = out["choices"][0].get("finish_reason", "stop")
@@ -134,7 +157,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        # 'close' y NO keep-alive: el cuerpo SSE no lleva Content-Length ni
+        # chunked encoding, asi que el cliente solo sabe que terminamos cuando
+        # se cierra la conexion. Con keep-alive el cliente se queda esperando
+        # bytes para siempre aunque ya hayamos mandado [DONE] (se veia como
+        # "180s sin output" en Hermes aunque el log del proxy decia 200 OK).
+        self.send_header("Connection", "close")
         self.end_headers()
 
         def _chunk(delta, finish=None):
@@ -160,6 +188,11 @@ class Handler(BaseHTTPRequestHandler):
             _chunk({}, finish=finish_reason)
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
+            # NO cerrar wfile a mano: BaseHTTPRequestHandler vuelve a hacer
+            # flush() al terminar y reventaria con "I/O operation on closed
+            # file". Marcar close_connection basta: el server cierra el socket
+            # al salir del handler, que es la senal de fin de cuerpo SSE.
+            self.close_connection = True
         except (BrokenPipeError, ConnectionResetError):
             print("[proxy] cliente cerro conexion antes de terminar el stream", flush=True)
 
